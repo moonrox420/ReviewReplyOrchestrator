@@ -1,0 +1,1 @@
+Move-Item -Path "C:\Users\droxa\CrossDevice\Dis Dick\storage\Movies\Signal" -Destination "E:\My Stuff\New folder (2)\"
