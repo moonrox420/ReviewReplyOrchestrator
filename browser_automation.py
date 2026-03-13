@@ -269,8 +269,11 @@ def _login(driver, email: str, password: str) -> bool:
             _wait_for_element(driver, By.XPATH,
                               '//*[@aria-label="Google Account"]', timeout=10)
         except TimeoutException:
-            # Some flows redirect directly; check URL instead
-            if "myaccount.google.com" in driver.current_url or "google.com" in driver.current_url:
+            # Some flows redirect directly; verify hostname using proper URL parsing
+            from urllib.parse import urlparse  # noqa: PLC0415
+            parsed = urlparse(driver.current_url)
+            hostname = parsed.hostname or ""
+            if hostname == "myaccount.google.com" or hostname.endswith(".google.com"):
                 pass
             else:
                 _screenshot(driver, "login-unknown-state")
