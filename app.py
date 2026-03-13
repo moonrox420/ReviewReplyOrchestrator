@@ -1,7 +1,10 @@
-import os, re, json, ssl, smtplib
+import asyncio
+import logging
+import os
+import re
+import json
 from datetime import datetime
 from typing import List, Literal, Optional
-from email.message import EmailMessage
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -22,6 +25,9 @@ load_dotenv("engine.env")
 
 import stripe
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
 HOST = os.getenv("ENGINE_HOST", "127.0.0.1")
 PORT = int(os.getenv("ENGINE_PORT", "7363"))
 DATA_ROOT = os.getenv("DATA_ROOT", ".")
@@ -39,14 +45,6 @@ PRICE_SPRINT_50 = os.getenv("PRICE_SPRINT_50", "price_sprint_50")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", "http://100.83.148.64:1234/v1/chat/completions")
 MODEL = os.getenv("REPLY_MODEL", "qwen2.5:7b-instruct")
-
-SMTP_ENABLED = os.getenv("SMTP_ENABLED", "false").lower() == "true"
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "owner@example.com")
-FROM_NAME = os.getenv("FROM_NAME", "Review Reply Sprint")
 
 SAMPLES_URL = os.getenv("SAMPLES_URL", "https://droxaillc.com/review-reply.html")
 
@@ -219,99 +217,19 @@ def build_pdf(path: str, business: str, reviews: List[Review], replies: List[str
     pdf.cell(0,6, clean(signoff), ln=1)
     pdf.output(path)
 
-def send_email(to_addr: str, subject: str, body: str, attachments: Optional[List[str]]=None):
-    """Send email with debug logging"""
-    msg = EmailMessage()
-    msg["From"] = f"{FROM_NAME} <{FROM_EMAIL}>"
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    msg.set_content(body)
-
-    for a in attachments or []:
-        with open(a,"rb") as f:
-            data = f.read()
-        maintype, subtype = ("application","octet-stream")
-        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=os.path.basename(a))
-
-    print(f"\n{'='*70}")
-    print(f"📧 EMAIL SEND ATTEMPT")
-    print(f"To: {to_addr}")
-    print(f"Subject: {subject}")
-    print(f"SMTP_ENABLED: {SMTP_ENABLED}")
-    print(f"SMTP_HOST: {SMTP_HOST}")
-    print(f"SMTP_PORT: {SMTP_PORT}")
-    print(f"SMTP_USER: {SMTP_USER}")
-    print(f"SMTP_PASS: {'***' + SMTP_PASS[-4:] if SMTP_PASS and len(SMTP_PASS) > 4 else 'NOT SET'}")
-    print(f"FROM_EMAIL: {FROM_EMAIL}")
-    print(f"FROM_NAME: {FROM_NAME}")
-    print(f"{'='*70}")
-
-    if SMTP_ENABLED and SMTP_HOST and SMTP_USER and SMTP_PASS:
-        try:
-            print("🔧 Step 1: Creating SSL context...")
-            ctx = ssl.create_default_context()
-            
-            print(f"🔧 Step 2: Connecting to {SMTP_HOST}:{SMTP_PORT}...")
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
-                print("🔧 Step 3: Starting TLS encryption...")
-                s.starttls(context=ctx)
-                
-                print("🔧 Step 4: Logging in...")
-                s.login(SMTP_USER, SMTP_PASS)
-                
-                print("🔧 Step 5: Sending message...")
-                s.send_message(msg)
-                
-                print(f"✅ EMAIL SENT SUCCESSFULLY to {to_addr}")
-                print(f"{'='*70}\n")
-                
-        except smtplib.SMTPAuthenticationError as e:
-            print(f"❌ AUTHENTICATION ERROR: {e}")
-            print("⚠️  This usually means:")
-            print("   - Wrong password")
-            print("   - 2FA enabled (need App Password)")
-            print("   - 'Less secure app access' disabled")
-            print(f"{'='*70}\n")
-            _save_locally(msg, subject)
-            
-        except smtplib.SMTPException as e:
-            print(f"❌ SMTP ERROR: {type(e).__name__}: {e}")
-            print(f"{'='*70}\n")
-            _save_locally(msg, subject)
-            
-        except Exception as e:
-            print(f"❌ UNEXPECTED ERROR: {type(e).__name__}: {e}")
-            print(f"{'='*70}\n")
-            _save_locally(msg, subject)
-    else:
-        print("⚠️  SMTP not fully configured. Missing:")
-        if not SMTP_ENABLED: print("   - SMTP_ENABLED=true")
-        if not SMTP_HOST: print("   - SMTP_HOST")
-        if not SMTP_USER: print("   - SMTP_USER")
-        if not SMTP_PASS: print("   - SMTP_PASS")
-        print(f"{'='*70}\n")
-        _save_locally(msg, subject)
-
-def _save_locally(msg: EmailMessage, subject: str):
-    """Save email to local outbox folder"""
-    outbox = os.path.join(DATA_ROOT,"outbox")
-    ensure_dir(outbox)
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    fn = os.path.join(outbox, f"{ts}-{subject.replace(' ','_')}.eml")
-    with open(fn,"wb") as f:
-        f.write(msg.as_bytes())
-    print(f"📁 Email saved locally to: {fn}\n")
-
-
-def weekly_kpi_job():
-    pass
-
 local_tz = get_localzone()
 sched = BackgroundScheduler(timezone=local_tz)
-sched.add_job(weekly_kpi_job, CronTrigger(day_of_week="mon", hour=8, minute=0))
 sched.start()
 
-app = FastAPI(title="Review Reply Orchestrator", version="1.0.0")
+app = FastAPI(title="Review Reply Orchestrator", version="2.0.0")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background review monitor on app startup."""
+    from monitor import monitor_loop  # noqa: PLC0415
+    asyncio.create_task(monitor_loop())
+    logger.info("Review monitoring loop started.")
 
 LANDING_PAGE = """
 <!DOCTYPE html>
@@ -319,7 +237,7 @@ LANDING_PAGE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Review Reply Sprint - AI-Powered Review Responses</title>
+    <title>Review Reply Orchestrator - Automatic Google Review Replies</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); color: #f1f5f9; }
@@ -332,21 +250,21 @@ LANDING_PAGE = """
         <header class="text-center mb-16">
             <h1 class="text-5xl font-extrabold mb-4">Never Stress Over Review Replies Again</h1>
             <p class="text-xl text-slate-300 max-w-2xl mx-auto">
-                AI-powered review responses that sound like YOU. Save 10+ hours per week. 
-                Get your first 5 replies FREE, then $199 for 50 professional responses.
+                AI-powered review responses posted automatically to Google. No copying, no pasting.
+                Connect your Google account once and let the system handle the rest.
             </p>
         </header>
 
         <div class="grid md:grid-cols-2 gap-8 mb-16">
-            <div class="card rounded-2xl p-8">
-                <h3 class="text-2xl font-bold mb-4">🎁 Free Sample</h3>
-                <p class="text-slate-300 mb-6">Send us 5 reviews, get 5 custom AI-generated replies back. Free. No credit card required.</p>
-                <form action="/lead-intake-demo" method="POST" class="space-y-4">
-                    <input type="text" name="business_name" placeholder="Your Business Name" required class="w-full px-4 py-3 rounded-lg bg-slate-800 border border-slate-700 focus:border-indigo-500 outline-none">
-                    <input type="email" name="email" placeholder="Your Email" required class="w-full px-4 py-3 rounded-lg bg-slate-800 border border-slate-700 focus:border-indigo-500 outline-none">
-                    <textarea name="reviews" placeholder="Paste 5 reviews here (one per line, include star rating like '5 Great service!')" rows="6" required class="w-full px-4 py-3 rounded-lg bg-slate-800 border border-slate-700 focus:border-indigo-500 outline-none"></textarea>
-                    <button type="submit" class="w-full btn text-white font-bold py-3 px-6 rounded-lg hover:opacity-90 transition">Get My Free Samples</button>
-                </form>
+            <div class="card rounded-2xl p-8 border-2 border-green-500/50">
+                <h3 class="text-2xl font-bold mb-4">🔗 Connect Google Account</h3>
+                <p class="text-slate-300 mb-6">
+                    One-time setup. Log in with your Google Business account and the
+                    orchestrator will automatically reply to new reviews every hour.
+                </p>
+                <a href="/oauth/start" class="block w-full btn text-white font-bold py-3 px-6 rounded-lg hover:opacity-90 transition text-center">
+                    Connect Google Account
+                </a>
             </div>
 
             <div class="card rounded-2xl p-8 border-2 border-indigo-500/50">
@@ -365,6 +283,17 @@ LANDING_PAGE = """
                     <input type="hidden" name="product" value="sprint_50">
                     <button type="submit" class="w-full btn text-white font-bold py-4 px-6 rounded-lg hover:opacity-90 transition text-lg">Buy Now - $199</button>
                 </form>
+            </div>
+        </div>
+
+        <div class="card rounded-2xl p-8 mb-16">
+            <h3 class="text-2xl font-bold mb-4">📊 Monitoring Status</h3>
+            <div id="status-placeholder" class="text-slate-300">
+                <a href="/reviews/status" class="text-indigo-400 hover:underline">Check status →</a>
+                &nbsp;|&nbsp;
+                <a href="/reviews/sync" class="text-green-400 hover:underline" onclick="this.innerText='Syncing...'; fetch('/reviews/sync',{method:'POST'}).then(r=>r.json()).then(d=>this.innerText='Sync complete ✓'); return false;">
+                    Trigger manual sync →
+                </a>
             </div>
         </div>
 
@@ -492,13 +421,92 @@ async def lead_intake(lead: Lead):
     replies = await generate_replies(job)
     base = job_dirs(lead.business_name)
     pdf = os.path.join(base, "sample-5.pdf")
-    docx= os.path.join(base, "sample-5.docx")
+    docx = os.path.join(base, "sample-5.docx")
     build_pdf(pdf, lead.business_name, job.reviews, replies, job.signoff)
     build_docx(docx, lead.business_name, job.reviews, replies, job.signoff)
-    send_email(
-        to_addr=lead.email,
-        subject=f"{lead.business_name} - 5 tailored review replies",
-        body=(f"Hi! Here are your 5 custom review replies.\n\nIf you like the quality, get 50 more here:\n{SAMPLES_URL}\n\nThanks!\nDroxAI"),
-        attachments=[pdf, docx]
-    )
-    return {"ok": True, "sent": True, "files": [pdf, docx]}
+    return {"ok": True, "files": [pdf, docx]}
+
+
+# ---------------------------------------------------------------------------
+# Google OAuth endpoints
+# ---------------------------------------------------------------------------
+
+# In-memory state store (single-user desktop app — one state token at a time)
+_oauth_state: Optional[str] = None
+
+
+@app.get("/oauth/start")
+async def oauth_start():
+    """Redirect the user to Google's OAuth2 consent screen."""
+    from google_api import GOOGLE_CLIENT_ID, get_authorization_url  # noqa: PLC0415
+
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_CLIENT_ID is not configured. Set it in engine.env.",
+        )
+
+    global _oauth_state
+    auth_url, state = get_authorization_url()
+    _oauth_state = state
+    return RedirectResponse(url=auth_url)
+
+
+@app.get("/oauth/callback")
+async def oauth_callback(code: str, state: str):
+    """Handle Google OAuth2 redirect, exchange code for tokens."""
+    global _oauth_state
+    from google_api import exchange_code_for_tokens  # noqa: PLC0415
+
+    if state != _oauth_state:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state parameter.")
+
+    try:
+        exchange_code_for_tokens(code=code, state=state)
+    except Exception as exc:
+        logger.error("OAuth token exchange failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"OAuth failed: {exc}")
+
+    _oauth_state = None
+    return HTMLResponse("""
+    <!DOCTYPE html>
+    <html><head><script src="https://cdn.tailwindcss.com"></script></head>
+    <body class="min-h-screen flex items-center justify-center"
+          style="background:linear-gradient(135deg,#0f172a,#1e293b);color:#f1f5f9">
+        <div class="text-center">
+            <div class="text-6xl mb-4">✅</div>
+            <h1 class="text-4xl font-extrabold mb-4">Google Account Connected!</h1>
+            <p class="text-xl text-slate-300 mb-8">
+                Your credentials are stored securely. The orchestrator will now
+                automatically check for new reviews and post replies every hour.
+            </p>
+            <a href="/" class="inline-block bg-indigo-600 text-white font-bold py-3 px-8 rounded-lg hover:bg-indigo-700">
+                Go to Dashboard
+            </a>
+        </div>
+    </body></html>
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Review management endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/reviews/sync")
+async def reviews_sync():
+    """Manually trigger a review sync (fetch + reply to new reviews)."""
+    from monitor import run_sync_once  # noqa: PLC0415
+    result = await run_sync_once()
+    return result
+
+
+@app.get("/reviews/status")
+async def reviews_status():
+    """Return current monitoring status and recent review statistics."""
+    from monitor import get_monitor_status, get_all_reviews  # noqa: PLC0415
+    from google_api import tokens_exist  # noqa: PLC0415
+
+    status = get_monitor_status()
+    status["google_connected"] = tokens_exist()
+    status["recent_reviews"] = get_all_reviews()[:20]
+    return status
