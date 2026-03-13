@@ -75,6 +75,18 @@ class Lead(BaseModel):
     reviews_sample: List[Review]
 
 
+class AutomationCredentials(BaseModel):
+    email: str
+    password: str
+
+
+class AutomationConfig(BaseModel):
+    enabled: Optional[bool] = None
+    interval_minutes: Optional[int] = None
+    headless: Optional[bool] = None
+    business_name: Optional[str] = None
+
+
 # SHORTENED PROMPTS to avoid context size issues
 SYSTEM_TMPL = """Write owner-voice Google review replies.
 Persona: {persona}. Compliance: {compliance}.
@@ -226,10 +238,25 @@ app = FastAPI(title="Review Reply Orchestrator", version="2.0.0")
 
 @app.on_event("startup")
 async def startup_event():
-    """Start background review monitor on app startup."""
+    """Start background review monitor and automation service on app startup."""
     from monitor import monitor_loop  # noqa: PLC0415
     asyncio.create_task(monitor_loop())
     logger.info("Review monitoring loop started.")
+
+    # Auto-start browser automation if credentials are configured
+    try:
+        from browser_automation import credentials_configured  # noqa: PLC0415
+        from automation_service import start_service  # noqa: PLC0415
+        if credentials_configured():
+            start_service()
+            logger.info("Browser automation service auto-started.")
+        else:
+            logger.info(
+                "Browser automation credentials not configured. "
+                "Visit /automation/setup to set them up."
+            )
+    except Exception as exc:
+        logger.warning("Could not start browser automation service: %s", exc)
 
 LANDING_PAGE = """
 <!DOCTYPE html>
@@ -243,6 +270,8 @@ LANDING_PAGE = """
         body { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); color: #f1f5f9; }
         .card { background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
         .btn { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
+        .btn-green { background: linear-gradient(135deg, #16a34a, #15803d); }
+        .btn-red { background: linear-gradient(135deg, #dc2626, #b91c1c); }
     </style>
 </head>
 <body class="min-h-screen">
@@ -250,20 +279,71 @@ LANDING_PAGE = """
         <header class="text-center mb-16">
             <h1 class="text-5xl font-extrabold mb-4">Never Stress Over Review Replies Again</h1>
             <p class="text-xl text-slate-300 max-w-2xl mx-auto">
-                AI-powered review responses posted automatically to Google. No copying, no pasting.
-                Connect your Google account once and let the system handle the rest.
+                AI-powered review responses posted automatically to Google Business.
+                No API keys required. Just your Google login credentials.
             </p>
         </header>
 
+        <!-- Browser Automation Setup -->
+        <div class="card rounded-2xl p-8 mb-8 border-2 border-green-500/50">
+            <h3 class="text-2xl font-bold mb-2">🤖 Automatic Review Replies (Browser Automation)</h3>
+            <p class="text-slate-300 mb-6">
+                Enter your Google Business credentials once. The software logs in automatically,
+                checks for new reviews every hour, and posts AI-generated replies — no manual work.
+            </p>
+            <div class="grid md:grid-cols-2 gap-8">
+                <div>
+                    <h4 class="font-semibold mb-3 text-green-400">Step 1 – Enter Credentials</h4>
+                    <form id="setup-form" onsubmit="setupAutomation(event)">
+                        <input type="email" id="setup-email" placeholder="Google Business Email"
+                            class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-3 mb-3 text-white placeholder-slate-400 focus:outline-none focus:border-green-500">
+                        <input type="password" id="setup-password" placeholder="Google Business Password"
+                            class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-3 mb-3 text-white placeholder-slate-400 focus:outline-none focus:border-green-500">
+                        <button type="submit" class="w-full btn-green text-white font-bold py-3 px-6 rounded-lg hover:opacity-90 transition">
+                            Save &amp; Start Automation
+                        </button>
+                    </form>
+                    <p id="setup-msg" class="mt-3 text-sm"></p>
+                </div>
+                <div>
+                    <h4 class="font-semibold mb-3 text-indigo-400">Step 2 – Control Service</h4>
+                    <div id="auto-status" class="text-slate-400 mb-4 text-sm">Loading status…</div>
+                    <div class="flex gap-3 flex-wrap">
+                        <button onclick="controlService('start')" class="btn-green text-white font-bold py-2 px-5 rounded-lg hover:opacity-90 text-sm">▶ Start</button>
+                        <button onclick="controlService('stop')" class="btn-red text-white font-bold py-2 px-5 rounded-lg hover:opacity-90 text-sm">■ Stop</button>
+                        <button onclick="runNow()" class="btn text-white font-bold py-2 px-5 rounded-lg hover:opacity-90 text-sm">⚡ Run Now</button>
+                        <a href="/automation/logs" class="btn text-white font-bold py-2 px-5 rounded-lg hover:opacity-90 text-sm inline-block">📋 View Logs</a>
+                    </div>
+                    <p id="service-msg" class="mt-3 text-sm"></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configure Interval -->
+        <div class="card rounded-2xl p-6 mb-8">
+            <h3 class="text-lg font-bold mb-3">⚙️ Configure Automation</h3>
+            <div class="flex gap-4 items-center flex-wrap">
+                <label class="text-slate-300">Check every</label>
+                <input type="number" id="interval-input" value="60" min="1" max="1440"
+                    class="w-24 bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500">
+                <label class="text-slate-300">minutes</label>
+                <label class="flex items-center gap-2 text-slate-300">
+                    <input type="checkbox" id="headless-check" checked class="w-4 h-4">
+                    Headless (background)
+                </label>
+                <button onclick="saveConfig()" class="btn text-white font-bold py-2 px-5 rounded-lg hover:opacity-90 text-sm">Save Config</button>
+                <span id="config-msg" class="text-sm text-green-400"></span>
+            </div>
+        </div>
+
         <div class="grid md:grid-cols-2 gap-8 mb-16">
-            <div class="card rounded-2xl p-8 border-2 border-green-500/50">
-                <h3 class="text-2xl font-bold mb-4">🔗 Connect Google Account</h3>
+            <div class="card rounded-2xl p-8 border-2 border-slate-500/50">
+                <h3 class="text-2xl font-bold mb-4">🔗 Google API Connection (Optional)</h3>
                 <p class="text-slate-300 mb-6">
-                    One-time setup. Log in with your Google Business account and the
-                    orchestrator will automatically reply to new reviews every hour.
+                    Alternative: connect via Google OAuth API (requires Google Cloud setup).
                 </p>
                 <a href="/oauth/start" class="block w-full btn text-white font-bold py-3 px-6 rounded-lg hover:opacity-90 transition text-center">
-                    Connect Google Account
+                    Connect via Google API
                 </a>
             </div>
 
@@ -274,7 +354,7 @@ LANDING_PAGE = """
                 <div class="text-4xl font-extrabold text-indigo-400 mb-6">$199 <span class="text-lg text-slate-400 font-normal">one-time</span></div>
                 <ul class="space-y-3 text-slate-300 mb-8">
                     <li>✓ 50 AI-generated custom replies</li>
-                    <li>✓ Your brand voice & tone</li>
+                    <li>✓ Your brand voice &amp; tone</li>
                     <li>✓ Compliance-checked (HIPAA/FTC)</li>
                     <li>✓ PDF + DOCX formats</li>
                     <li>✓ 24-hour delivery</li>
@@ -289,10 +369,12 @@ LANDING_PAGE = """
         <div class="card rounded-2xl p-8 mb-16">
             <h3 class="text-2xl font-bold mb-4">📊 Monitoring Status</h3>
             <div id="status-placeholder" class="text-slate-300">
-                <a href="/reviews/status" class="text-indigo-400 hover:underline">Check status →</a>
+                <a href="/reviews/status" class="text-indigo-400 hover:underline">Check API status →</a>
                 &nbsp;|&nbsp;
-                <a href="/reviews/sync" class="text-green-400 hover:underline" onclick="this.innerText='Syncing...'; fetch('/reviews/sync',{method:'POST'}).then(r=>r.json()).then(d=>this.innerText='Sync complete ✓'); return false;">
-                    Trigger manual sync →
+                <a href="/automation/status" class="text-green-400 hover:underline">Check automation status →</a>
+                &nbsp;|&nbsp;
+                <a href="#" class="text-yellow-400 hover:underline" onclick="this.innerText='Syncing...'; fetch('/reviews/sync',{method:'POST'}).then(r=>r.json()).then(d=>{this.innerText='Sync complete ✓'}); return false;">
+                    Trigger manual API sync →
                 </a>
             </div>
         </div>
@@ -302,6 +384,93 @@ LANDING_PAGE = """
             <p class="mt-4 text-sm">Built by DroxAI LLC</p>
         </div>
     </div>
+
+    <script>
+    // Load automation status on page load
+    async function loadStatus() {
+        try {
+            const r = await fetch('/automation/status');
+            const d = await r.json();
+            const el = document.getElementById('auto-status');
+            const running = d.running ? '🟢 Running' : '🔴 Stopped';
+            const creds = d.credentials_configured ? '✅ Credentials saved' : '⚠️ No credentials';
+            const last = d.last_run ? new Date(d.last_run).toLocaleString() : 'Never';
+            el.innerHTML = `${running} &nbsp;|&nbsp; ${creds} &nbsp;|&nbsp; Last run: ${last} &nbsp;|&nbsp; Interval: ${d.interval_minutes}min`;
+
+            // Pre-fill interval
+            document.getElementById('interval-input').value = d.interval_minutes || 60;
+        } catch(e) {
+            document.getElementById('auto-status').textContent = 'Could not load status';
+        }
+    }
+
+    async function setupAutomation(e) {
+        e.preventDefault();
+        const email = document.getElementById('setup-email').value;
+        const password = document.getElementById('setup-password').value;
+        const msg = document.getElementById('setup-msg');
+        if (!email || !password) { msg.textContent = 'Email and password are required.'; msg.className='mt-3 text-sm text-red-400'; return; }
+        msg.textContent = 'Saving…'; msg.className='mt-3 text-sm text-slate-400';
+        try {
+            const r = await fetch('/automation/setup', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({email, password})
+            });
+            const d = await r.json();
+            msg.textContent = d.ok ? '✅ Credentials saved & automation started!' : ('❌ ' + (d.detail || d.message));
+            msg.className = 'mt-3 text-sm ' + (d.ok ? 'text-green-400' : 'text-red-400');
+            document.getElementById('setup-password').value = '';
+            if (d.ok) loadStatus();
+        } catch(e) { msg.textContent = '❌ Request failed'; msg.className='mt-3 text-sm text-red-400'; }
+    }
+
+    async function controlService(action) {
+        const msg = document.getElementById('service-msg');
+        msg.textContent = 'Working…'; msg.className='mt-3 text-sm text-slate-400';
+        try {
+            const r = await fetch('/automation/' + action, {method:'POST'});
+            const d = await r.json();
+            msg.textContent = (d.ok ? '✅ ' : '⚠️ ') + d.message;
+            msg.className = 'mt-3 text-sm ' + (d.ok ? 'text-green-400' : 'text-yellow-400');
+            loadStatus();
+        } catch(e) { msg.textContent = '❌ Request failed'; msg.className='mt-3 text-sm text-red-400'; }
+    }
+
+    async function runNow() {
+        const msg = document.getElementById('service-msg');
+        msg.textContent = 'Running automation pass… (may take a minute)'; msg.className='mt-3 text-sm text-slate-400';
+        try {
+            const r = await fetch('/automation/run-now', {method:'POST'});
+            const d = await r.json();
+            if (d.ok) {
+                msg.textContent = `✅ Done – found ${d.reviews_found} reviews, posted ${d.replies_posted} replies, ${d.errors} errors`;
+                msg.className='mt-3 text-sm text-green-400';
+            } else {
+                msg.textContent = '❌ ' + (d.error || 'Failed');
+                msg.className='mt-3 text-sm text-red-400';
+            }
+        } catch(e) { msg.textContent = '❌ Request failed'; msg.className='mt-3 text-sm text-red-400'; }
+    }
+
+    async function saveConfig() {
+        const interval = parseInt(document.getElementById('interval-input').value);
+        const headless = document.getElementById('headless-check').checked;
+        const msg = document.getElementById('config-msg');
+        try {
+            const r = await fetch('/automation/config', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({interval_minutes: interval, headless})
+            });
+            const d = await r.json();
+            msg.textContent = d.ok ? '✅ Saved' : '❌ Failed';
+            setTimeout(()=>{msg.textContent=''}, 3000);
+        } catch(e) { msg.textContent = '❌ Error'; }
+    }
+
+    loadStatus();
+    </script>
 </body>
 </html>
 """
@@ -510,3 +679,88 @@ async def reviews_status():
     status["google_connected"] = tokens_exist()
     status["recent_reviews"] = get_all_reviews()[:20]
     return status
+
+
+# ---------------------------------------------------------------------------
+# Browser automation endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/automation/setup")
+async def automation_setup(creds: AutomationCredentials):
+    """
+    Save Google Business credentials (encrypted) and auto-start the service.
+
+    The password is encrypted with Fernet before being written to config.json.
+    It is NEVER logged or returned in plain text.
+    """
+    from browser_automation import save_credentials  # noqa: PLC0415
+    from automation_service import start_service  # noqa: PLC0415
+
+    save_credentials(creds.email, creds.password)
+    result = start_service()
+    return {"ok": True, "message": "Credentials saved and automation started.", "service": result}
+
+
+@app.post("/automation/start")
+async def automation_start():
+    """Start the browser automation background service."""
+    from automation_service import start_service  # noqa: PLC0415
+    return start_service()
+
+
+@app.post("/automation/stop")
+async def automation_stop():
+    """Stop the browser automation background service."""
+    from automation_service import stop_service  # noqa: PLC0415
+    return stop_service()
+
+
+@app.get("/automation/status")
+async def automation_status():
+    """Return automation service status."""
+    from automation_service import get_status  # noqa: PLC0415
+    from browser_automation import credentials_configured  # noqa: PLC0415
+
+    status = get_status()
+    status["credentials_configured"] = credentials_configured()
+    return status
+
+
+@app.post("/automation/run-now")
+async def automation_run_now():
+    """Immediately trigger one automation pass (outside of the scheduled interval)."""
+    from automation_service import run_once  # noqa: PLC0415
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, run_once)
+    return result
+
+
+@app.post("/automation/config")
+async def automation_config_update(cfg: AutomationConfig):
+    """Update automation configuration settings."""
+    from browser_automation import load_config, save_config  # noqa: PLC0415
+
+    current = load_config()
+    auto_cfg = current.setdefault("automation", {})
+
+    if cfg.enabled is not None:
+        auto_cfg["enabled"] = cfg.enabled
+    if cfg.interval_minutes is not None:
+        if cfg.interval_minutes < 1 or cfg.interval_minutes > 1440:
+            raise HTTPException(status_code=400, detail="interval_minutes must be between 1 and 1440")
+        auto_cfg["interval_minutes"] = cfg.interval_minutes
+    if cfg.headless is not None:
+        auto_cfg["headless"] = cfg.headless
+    if cfg.business_name is not None:
+        auto_cfg["business_name"] = cfg.business_name
+
+    save_config(current)
+    return {"ok": True, "automation": auto_cfg}
+
+
+@app.get("/automation/logs")
+async def automation_logs(lines: int = 100):
+    """Return recent lines from automation.log."""
+    from automation_service import get_recent_logs  # noqa: PLC0415
+    return {"lines": get_recent_logs(lines)}

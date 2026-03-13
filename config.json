@@ -1,0 +1,12 @@
+{
+  "automation": {
+    "enabled": true,
+    "interval_minutes": 60,
+    "headless": true,
+    "business_name": "My Business"
+  },
+  "google_credentials": {
+    "email": "",
+    "password_enc": ""
+  }
+}
