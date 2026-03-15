@@ -1,0 +1,43 @@
+AUTOMATED REVIEW REPLY BOT - SETUP INSTRUCTIONS
+================================================
+
+STEP 1: GET ANTHROPIC API KEY (FREE)
+-------------------------------------
+1. Go to: https://console.anthropic.com/
+2. Sign up for free account
+3. Go to API Keys section
+4. Create new key
+5. Copy the key (starts with "sk-ant-")
+
+STEP 2: RUN THE SOFTWARE
+------------------------
+1. Double-click ReviewReplyBot.exe
+2. Enter your license key (sent via email)
+3. Enter your email
+
+STEP 3: FIRST-TIME CONFIGURATION
+---------------------------------
+You'll be asked for:
+- Google Business Profile email
+- Google Business Profile password
+- Anthropic API key (from Step 1)
+- Your business name
+- Reply tone (e.g., "professional and friendly")
+
+STEP 4: LET IT RUN
+------------------
+- Software will check for new reviews every 5 minutes
+- Automatically generates and posts replies
+- Keep the window open to keep it running
+- Press Ctrl+C to stop
+
+TROUBLESHOOTING
+---------------
+- If login fails: Check your Google credentials
+- If API error: Verify Anthropic API key is correct
+- For support: Contact your seller
+
+LICENSE
+-------
+This software is licensed to you only.
+Do not share your license key.
