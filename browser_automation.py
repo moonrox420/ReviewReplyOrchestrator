@@ -51,12 +51,10 @@ def _get_driver(headless: bool = True):
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
     except ImportError as exc:
         raise RuntimeError(
-            "Selenium or webdriver-manager is not installed. "
-            "Run: pip install selenium webdriver-manager"
+            "Selenium is not installed. "
+            "Run: pip install selenium"
         ) from exc
 
     options = Options()
@@ -70,8 +68,8 @@ def _get_driver(headless: bool = True):
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
+    # Selenium 4.6+ automatically manages ChromeDriver installation
+    driver = webdriver.Chrome(options=options)
     driver.execute_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
