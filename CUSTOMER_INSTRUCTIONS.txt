@@ -1,0 +1,74 @@
+AUTOMATED REVIEW REPLY BOT - SETUP GUIDE
+=========================================
+
+PRICING:
+--------
+$199 one-time purchase
+$99/month subscription (software locks if cancelled)
+
+STEP 1: INSTALL OLLAMA (FREE AI)
+---------------------------------
+1. Go to: https://ollama.ai
+2. Download and install for your OS
+3. Open terminal/command prompt
+4. Run: ollama pull qwen2.5:7b-instruct
+5. Wait for download (may take 10-15 minutes)
+6. Keep Ollama running in background
+
+Alternative: LM Studio
+1. Download from: https://lmstudio.ai
+2. Install and download a model
+3. Start local server
+
+STEP 2: INSTALL PYTHON DEPENDENCIES
+------------------------------------
+1. Open Command Prompt (Windows) or Terminal (Mac/Linux)
+2. Navigate to bot folder: cd path/to/ReviewBot
+3. Run: pip install -r requirements_sellable.txt
+
+STEP 3: RUN THE BOT
+-------------------
+1. Double-click: review_bot_sellable.py
+   OR run: python review_bot_sellable.py
+
+2. Enter license key (sent via email after purchase)
+3. Enter your email
+
+STEP 4: CONFIGURE
+-----------------
+First run will ask for:
+- Google Business email
+- Google Business password
+- Business name
+- AI setup (select Ollama or LM Studio)
+- Reply tone
+
+STEP 5: LET IT RUN
+------------------
+- Checks for new reviews every 5 minutes
+- Generates and posts replies automatically
+- Keep window open
+- Press Ctrl+C to stop
+
+SUBSCRIPTION:
+-------------
+- Bot checks subscription status every run
+- If payment fails, bot will lock
+- Reactivate at: https://gumroad.com/yourlink
+- Contact support: your@email.com
+
+TROUBLESHOOTING:
+----------------
+Q: "AI not responding"
+A: Make sure Ollama is running: ollama serve
+
+Q: "Login failed"
+A: Check Google credentials, may need app password
+
+Q: "License invalid"
+A: Contact support with purchase receipt
+
+SUPPORT:
+--------
+Email: your@email.com
+Response within 24 hours
