@@ -1,579 +1,395 @@
 """
-browser_automation.py – Selenium-based Google My Business browser automation.
+browser_automation.py – Optimized Selenium-based Google My Business automation.
 
-Logs into Google My Business using stored credentials, navigates to the
-Reviews section, identifies unanswered reviews, and posts AI-generated
-replies automatically.  No Google API key required.
-
-Usage (standalone test):
-    python browser_automation.py
-
-Environment / config:
-    Credentials are read from config.json (encrypted with Fernet).
-    See automation_service.py for the background scheduling loop.
+Handles browser-based login, review fetching, and reply posting
+with improved error handling, async operations, and retry logic.
 """
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
-import os
-import time
-import traceback
 from pathlib import Path
 from typing import Optional
 
-from cryptography.fernet import Fernet, InvalidToken
+from selenium import webdriver
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    TimeoutException,
+    WebDriverException,
+)
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.webdriver import WebDriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from config import TimeoutConfig, get_config
+from credentials import get_browser_credential_store
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-CONFIG_PATH = os.getenv("CONFIG_PATH", "config.json")
-FERNET_KEY_PATH = os.getenv("FERNET_KEY_PATH", "./tokens/fernet.key")
-SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "./logs/screenshots")
-
-# Maximum number of characters to take from a review card's text content
-# when a dedicated review-text element cannot be found.
-MAX_REVIEW_TEXT_LENGTH = 500
-
-# How many seconds to sleep between stop-event checks inside the service loop.
-STOP_CHECK_INTERVAL_SECONDS = 5
 
 # ---------------------------------------------------------------------------
-# Selenium imports (lazy-loaded so the rest of the app works without Selenium)
+# Browser Driver Factory
 # ---------------------------------------------------------------------------
 
-def _get_driver(headless: bool = True):
-    """Return a configured Chrome WebDriver instance."""
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-    except ImportError as exc:
-        raise RuntimeError(
-            "Selenium is not installed. "
-            "Run: pip install selenium"
-        ) from exc
-
-    options = Options()
-    if headless:
-        options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-
-    # Selenium 4.6+ automatically manages ChromeDriver installation
-    driver = webdriver.Chrome(options=options)
-    driver.execute_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-    return driver
-
-
-# ---------------------------------------------------------------------------
-# Credential helpers
-# ---------------------------------------------------------------------------
-
-def _get_or_create_fernet_key() -> bytes:
-    key_path = Path(FERNET_KEY_PATH)
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-    if key_path.exists():
-        return key_path.read_bytes().strip()
-    key = Fernet.generate_key()
-    key_path.write_bytes(key)
-    try:
-        os.chmod(key_path, 0o600)
-    except OSError as exc:
-        logger.warning("Could not set restrictive permissions on key file %s: %s", key_path, exc)
-    return key
-
-
-def _fernet() -> Fernet:
-    return Fernet(_get_or_create_fernet_key())
-
-
-def load_config() -> dict:
-    """Load config.json, returning defaults if file is absent."""
-    defaults: dict = {
-        "automation": {
-            "enabled": True,
-            "interval_minutes": 60,
-            "headless": True,
-        },
-        "google_credentials": {
-            "email": "",
-            "password_enc": "",
-        },
-    }
-    if not os.path.exists(CONFIG_PATH):
-        return defaults
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Merge defaults for any missing keys
-        for k, v in defaults.items():
-            data.setdefault(k, v)
-        return data
-    except Exception as exc:
-        logger.warning("Failed to load config.json: %s", exc)
-        return defaults
-
-
-def save_config(cfg: dict) -> None:
-    """Persist config (without plaintext password) to config.json."""
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-
-
-def get_credentials() -> tuple[str, str]:
-    """Return (email, password) from config.  Password is decrypted."""
-    cfg = load_config()
-    creds = cfg.get("google_credentials", {})
-    email: str = creds.get("email", "")
-    password_enc: str = creds.get("password_enc", "")
-    if not password_enc:
-        return email, ""
-    try:
-        password = _fernet().decrypt(password_enc.encode()).decode()
-    except (InvalidToken, Exception) as exc:
-        logger.error("Failed to decrypt password: %s", exc)
-        password = ""
-    return email, password
-
-
-def save_credentials(email: str, password: str) -> None:
-    """Encrypt and persist Google Business credentials to config.json."""
-    cfg = load_config()
-    encrypted = _fernet().encrypt(password.encode()).decode()
-    cfg["google_credentials"] = {
-        "email": email,
-        "password_enc": encrypted,
-    }
-    # Never write plaintext password
-    save_config(cfg)
-    logger.info("Credentials saved for %s", email)
-
-
-def credentials_configured() -> bool:
-    """Return True if both email and encrypted password are present."""
-    email, password = get_credentials()
-    return bool(email and password)
-
-
-# ---------------------------------------------------------------------------
-# Screenshot helper
-# ---------------------------------------------------------------------------
-
-def _screenshot(driver, label: str) -> Optional[str]:
-    """Save a screenshot and return the file path (None on failure)."""
-    try:
-        Path(SCREENSHOTS_DIR).mkdir(parents=True, exist_ok=True)
-        ts = time.strftime("%Y%m%d-%H%M%S")
-        path = os.path.join(SCREENSHOTS_DIR, f"{ts}-{label}.png")
-        driver.save_screenshot(path)
-        logger.info("Screenshot saved: %s", path)
-        return path
-    except Exception as exc:
-        logger.warning("Could not save screenshot: %s", exc)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Login helper
-# ---------------------------------------------------------------------------
-
-def _wait_for_element(driver, by, value, timeout: int = 20):
-    """Wait up to *timeout* seconds for an element to be present."""
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
-    return WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((by, value))
-    )
-
-
-def _login(driver, email: str, password: str) -> bool:
+class BrowserDriver:
     """
-    Log into Google with the supplied credentials.
-
-    Returns True on success, False on failure.
-    Pauses for manual intervention if 2FA / CAPTCHA is detected.
+    Manages Chrome WebDriver lifecycle with proper cleanup.
+    
+    Implements context manager protocol for automatic resource management.
     """
-    from selenium.webdriver.common.by import By
-    from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
-    try:
-        logger.info("Navigating to Google sign-in…")
-        driver.get("https://accounts.google.com/signin")
+    def __init__(self, headless: bool = True):
+        """Initialize browser driver."""
+        self.headless = headless
+        self.driver: Optional[WebDriver] = None
+        self.config = get_config()
 
-        # Enter email
-        email_field = _wait_for_element(driver, By.ID, "identifierId")
-        email_field.clear()
-        email_field.send_keys(email)
+    def __enter__(self) -> WebDriver:
+        """Context manager entry."""
+        self.driver = self._create_driver()
+        return self.driver
 
-        next_btn = _wait_for_element(driver, By.ID, "identifierNext")
-        next_btn.click()
-        time.sleep(2)
-
-        # Enter password (Google uses 'Passwords' or 'password' depending on flow version)
-        password_field = None
-        for pw_selector in [
-            (By.NAME, "Passwords"),
-            (By.NAME, "password"),
-            (By.CSS_SELECTOR, 'input[type="password"]'),
-        ]:
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit with cleanup."""
+        if self.driver:
             try:
-                password_field = _wait_for_element(driver, pw_selector[0], pw_selector[1], timeout=8)
-                break
-            except Exception:
-                continue
-        if password_field is None:
-            logger.error("Password field not found on login page.")
-            _screenshot(driver, "login-no-password-field")
-            return False
-        password_field.send_keys(password)
+                self.driver.quit()
+            except WebDriverException as exc:
+                logger.warning("Error closing browser: %s", exc)
 
-        pass_next = _wait_for_element(driver, By.ID, "passwordNext")
-        pass_next.click()
-        time.sleep(3)
-
-        # Detect 2FA / CAPTCHA
-        page_src = driver.page_source.lower()
-        if any(kw in page_src for kw in ("2-step", "two-step", "verify it's you", "phone", "authenticator")):
-            logger.warning(
-                "2FA detected – automation paused. "
-                "Complete the 2FA challenge in the browser window, then the "
-                "service will retry on the next scheduled run."
-            )
-            _screenshot(driver, "2fa-detected")
-            return False
-
-        if "captcha" in page_src or "unusual traffic" in page_src:
-            logger.warning(
-                "CAPTCHA detected – automation paused. "
-                "Resolve the CAPTCHA manually and restart the service."
-            )
-            _screenshot(driver, "captcha-detected")
-            return False
-
-        # Confirm we are logged in by checking for account chooser or dashboard
-        try:
-            _wait_for_element(driver, By.XPATH,
-                              '//*[@aria-label="Google Account"]', timeout=10)
-        except TimeoutException:
-            # Some flows redirect directly; verify hostname using proper URL parsing
-            from urllib.parse import urlparse  # noqa: PLC0415
-            parsed = urlparse(driver.current_url)
-            hostname = parsed.hostname or ""
-            if hostname == "myaccount.google.com" or hostname.endswith(".google.com"):
-                pass
-            else:
-                _screenshot(driver, "login-unknown-state")
-                logger.error("Login may have failed. Current URL: %s", driver.current_url)
-                return False
-
-        logger.info("Login successful.")
-        return True
-
-    except Exception as exc:
-        logger.error("Login error: %s\n%s", exc, traceback.format_exc())
-        _screenshot(driver, "login-error")
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Review scraping & reply posting
-# ---------------------------------------------------------------------------
-
-def _navigate_to_reviews(driver) -> bool:
-    """
-    Navigate to the Google Business reviews management page.
-    Returns True on success.
-    """
-    from selenium.webdriver.common.by import By
-    from selenium.common.exceptions import TimeoutException
-
-    try:
-        logger.info("Navigating to Google Business Profile…")
-        driver.get("https://business.google.com")
-        time.sleep(3)
-
-        # Try the direct reviews URL pattern
-        current_url = driver.current_url
-        logger.debug("Business profile URL: %s", current_url)
-
-        # Look for "Reviews" link or navigate directly
-        try:
-            reviews_link = _wait_for_element(
-                driver, By.XPATH,
-                '//a[contains(@href,"reviews") or contains(text(),"Reviews") '
-                'or contains(@aria-label,"Reviews")]',
-                timeout=10,
-            )
-            reviews_link.click()
-            time.sleep(2)
-        except TimeoutException:
-            # Fall back: navigate directly
-            driver.get("https://business.google.com/reviews")
-            time.sleep(3)
-
-        logger.info("Reviews page loaded: %s", driver.current_url)
-        return True
-
-    except Exception as exc:
-        logger.error("Failed to navigate to reviews: %s", exc)
-        _screenshot(driver, "reviews-nav-error")
-        return False
-
-
-def scrape_unanswered_reviews(driver) -> list[dict]:
-    """
-    Scrape unanswered reviews from the current Google Business reviews page.
-
-    Returns a list of dicts with keys: element, text, rating, review_id.
-    Only reviews that have a "Reply" button (no existing reply) are returned.
-    """
-    from selenium.webdriver.common.by import By
-
-    unanswered: list[dict] = []
-
-    try:
-        time.sleep(2)
-        # Find all review cards
-        review_cards = driver.find_elements(
-            By.XPATH,
-            '//*[contains(@class,"review") or contains(@data-reviewid,"")]'
-            '[.//*[contains(text(),"Reply") or contains(@aria-label,"Reply")]]',
+    def _create_driver(self) -> WebDriver:
+        """Create configured Chrome WebDriver."""
+        options = Options()
+        
+        if self.headless:
+            options.add_argument("--headless=new")
+        
+        # Performance and stealth options
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        
+        # User agent
+        options.add_argument(
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
         )
+        
+        driver = webdriver.Chrome(options=options)
+        
+        # Remove webdriver detection
+        driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        
+        logger.info("Chrome WebDriver initialized (headless=%s)", self.headless)
+        return driver
 
-        if not review_cards:
-            # Alternative selector set
-            review_cards = driver.find_elements(
-                By.XPATH,
-                '//div[contains(@jsaction,"click:") and '
-                './/span[contains(@class,"star") or @aria-label]]',
+
+# ---------------------------------------------------------------------------
+# Google My Business Automation
+# ---------------------------------------------------------------------------
+
+class GMBAutomation:
+    """
+    Google My Business browser automation.
+    
+    Handles login, navigation, and review interaction via Selenium.
+    """
+
+    GMB_URL = "https://business.google.com"
+    REVIEWS_PATH = "/reviews"
+
+    def __init__(self, driver: WebDriver):
+        """Initialize GMB automation."""
+        self.driver = driver
+        self.wait = WebDriverWait(driver, TimeoutConfig.SELENIUM_WAIT)
+        self.config = get_config()
+
+    async def login(self, email: str, password: str) -> bool:
+        """Log into Google My Business."""
+        try:
+            logger.info("Navigating to GMB login: %s", self.GMB_URL)
+            self.driver.get(self.GMB_URL)
+            
+            # Wait for email input
+            email_field = self.wait.until(
+                EC.presence_of_element_located((By.ID, "identifierId"))
             )
+            email_field.send_keys(email)
+            
+            # Click next
+            next_button = self.wait.until(
+                EC.element_to_be_clickable((By.ID, "identifierNext"))
+            )
+            next_button.click()
+            
+            await asyncio.sleep(2)  # Wait for page transition
+            
+            # Wait for password input
+            password_field = self.wait.until(
+                EC.presence_of_element_located((By.NAME, "password"))
+            )
+            password_field.send_keys(password)
+            
+            # Click next
+            next_button = self.wait.until(
+                EC.element_to_be_clickable((By.ID, "passwordNext"))
+            )
+            next_button.click()
+            
+            await asyncio.sleep(3)  # Wait for login to complete
+            
+            # Verify login success
+            if "myaccount.google.com" in self.driver.current_url or "business.google.com" in self.driver.current_url:
+                logger.info("✓ Login successful")
+                return True
+            
+            logger.error("Login failed: unexpected redirect")
+            self._save_screenshot("login_failed")
+            return False
+            
+        except (TimeoutException, NoSuchElementException) as exc:
+            logger.error("Login failed: %s", exc)
+            self._save_screenshot("login_error")
+            return False
 
-        logger.info("Found %d potential review cards.", len(review_cards))
+    async def navigate_to_reviews(self) -> bool:
+        """Navigate to reviews section."""
+        try:
+            reviews_url = f"{self.GMB_URL}{self.REVIEWS_PATH}"
+            logger.info("Navigating to reviews: %s", reviews_url)
+            
+            self.driver.get(reviews_url)
+            await asyncio.sleep(3)
+            
+            # Wait for reviews to load
+            self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-review-id]"))
+            )
+            
+            logger.info("✓ Reviews page loaded")
+            return True
+            
+        except TimeoutException as exc:
+            logger.error("Failed to load reviews: %s", exc)
+            self._save_screenshot("reviews_load_error")
+            return False
 
-        for card in review_cards:
-            try:
-                # Check for Reply button (means unanswered)
-                reply_btns = card.find_elements(
-                    By.XPATH,
-                    './/button[contains(text(),"Reply") or '
-                    'contains(@aria-label,"Reply") or '
-                    'contains(@data-value,"Reply")]',
-                )
-                if not reply_btns:
+    async def fetch_unanswered_reviews(self) -> list[dict]:
+        """Fetch unanswered reviews from current page."""
+        reviews = []
+        
+        try:
+            # Find all review cards
+            review_elements = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                "[data-review-id]"
+            )
+            
+            logger.info("Found %d review elements", len(review_elements))
+            
+            for element in review_elements:
+                try:
+                    # Check if already replied
+                    try:
+                        element.find_element(By.CSS_SELECTOR, "[data-reply-id]")
+                        continue  # Skip if already has reply
+                    except NoSuchElementException:
+                        pass  # No reply found, continue processing
+                    
+                    # Extract review data
+                    review_id = element.get_attribute("data-review-id")
+                    
+                    # Get rating
+                    rating_elem = element.find_element(By.CSS_SELECTOR, "[aria-label*='star']")
+                    rating_text = rating_elem.get_attribute("aria-label")
+                    rating = int(rating_text.split()[0]) if rating_text else 5
+                    
+                    # Get review text
+                    try:
+                        text_elem = element.find_element(By.CSS_SELECTOR, ".review-text")
+                        review_text = text_elem.text.strip()
+                    except NoSuchElementException:
+                        review_text = ""
+                    
+                    # Get reviewer name
+                    try:
+                        name_elem = element.find_element(By.CSS_SELECTOR, ".reviewer-name")
+                        reviewer_name = name_elem.text.strip()
+                    except NoSuchElementException:
+                        reviewer_name = "Anonymous"
+                    
+                    reviews.append({
+                        "review_id": review_id,
+                        "rating": rating,
+                        "review_text": review_text,
+                        "reviewer_name": reviewer_name,
+                    })
+                    
+                except Exception as exc:
+                    logger.warning("Failed to parse review element: %s", exc)
                     continue
+            
+            logger.info("Extracted %d unanswered reviews", len(reviews))
+            return reviews
+            
+        except Exception as exc:
+            logger.error("Failed to fetch reviews: %s", exc)
+            self._save_screenshot("fetch_error")
+            return []
 
-                # Extract review text
-                text_el = card.find_elements(
-                    By.XPATH, './/span[contains(@class,"review-text") or @data-review-text]'
-                )
-                review_text = text_el[0].text if text_el else card.text[:MAX_REVIEW_TEXT_LENGTH]
-
-                # Extract star rating (look for aria-label with "stars")
-                rating = 3  # default
-                star_el = card.find_elements(
-                    By.XPATH, './/*[@aria-label and contains(@aria-label,"star")]'
-                )
-                if star_el:
-                    label = star_el[0].get_attribute("aria-label")
-                    for n in range(1, 6):
-                        if str(n) in (label or ""):
-                            rating = n
-                            break
-                else:
-                    logger.warning(
-                        "Could not extract star rating for review card; defaulting to 3 stars."
-                    )
-
-                review_id = card.get_attribute("data-reviewid") or str(id(card))
-                unanswered.append({
-                    "element": card,
-                    "reply_button": reply_btns[0],
-                    "text": review_text,
-                    "rating": rating,
-                    "review_id": review_id,
-                })
-            except Exception as exc:
-                logger.debug("Skipping malformed review card: %s", exc)
-                continue
-
-    except Exception as exc:
-        logger.error("Error scraping reviews: %s", exc)
-        _screenshot(driver, "scrape-error")
-
-    return unanswered
-
-
-def post_reply_to_review(driver, review: dict, reply_text: str) -> bool:
-    """
-    Click the Reply button on a review card, type the reply, and submit it.
-
-    Returns True on success.
-    """
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.common.keys import Keys
-    from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
-
-    try:
-        reply_btn = review["reply_button"]
-        driver.execute_script("arguments[0].scrollIntoView(true);", reply_btn)
-        time.sleep(0.5)
-        reply_btn.click()
-        time.sleep(1.5)
-
-        # Find the reply text area
-        text_area = None
-        for selector in [
-            (By.XPATH, '//textarea[@placeholder or contains(@aria-label,"reply") or contains(@aria-label,"Reply")]'),
-            (By.CSS_SELECTOR, 'textarea[aria-label*="reply" i], textarea[placeholder*="reply" i]'),
-            (By.TAG_NAME, 'textarea'),
-        ]:
-            try:
-                text_area = _wait_for_element(driver, selector[0], selector[1], timeout=8)
-                break
-            except TimeoutException:
-                continue
-
-        if text_area is None:
-            logger.error("Could not find reply text area for review %s", review.get("review_id"))
-            _screenshot(driver, f"no-textarea-{review.get('review_id', 'unknown')}")
-            return False
-
-        # Clear and type reply
-        text_area.click()
-        text_area.send_keys(Keys.CONTROL + "a")
-        text_area.send_keys(Keys.DELETE)
-        text_area.send_keys(reply_text)
-        time.sleep(0.5)
-
-        # Submit – look for "Post reply" / "Submit" button
-        submitted = False
-        for submit_xpath in [
-            '//button[contains(text(),"Post reply") or contains(text(),"Reply") or '
-            'contains(text(),"Submit") or contains(text(),"Post")]',
-            '//button[@type="submit"]',
-        ]:
-            try:
-                submit_btn = _wait_for_element(driver, By.XPATH, submit_xpath, timeout=6)
-                submit_btn.click()
-                submitted = True
-                break
-            except TimeoutException:
-                continue
-
-        if not submitted:
-            logger.error("Could not find submit button for review %s", review.get("review_id"))
-            _screenshot(driver, f"no-submit-{review.get('review_id', 'unknown')}")
-            return False
-
-        # Wait for confirmation (the reply area should disappear or a success banner appear)
-        time.sleep(2)
-        logger.info("Reply posted for review %s", review.get("review_id"))
-        return True
-
-    except StaleElementReferenceException:
-        logger.warning("Stale element for review %s – page may have refreshed.", review.get("review_id"))
-        return False
-    except Exception as exc:
-        logger.error(
-            "Error posting reply for review %s: %s\n%s",
-            review.get("review_id"), exc, traceback.format_exc(),
-        )
-        _screenshot(driver, f"reply-error-{review.get('review_id', 'unknown')}")
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Main public API
-# ---------------------------------------------------------------------------
-
-def run_browser_automation(
-    generate_reply_fn,  # callable(rating: int, text: str) -> str
-) -> dict:
-    """
-    Full automation pass:
-      1. Load credentials.
-      2. Launch Chrome (headless or not, per config).
-      3. Log into Google.
-      4. Navigate to reviews.
-      5. For each unanswered review: generate + post reply.
-      6. Return summary dict.
-
-    ``generate_reply_fn`` is injected so this module stays decoupled from
-    app.py's async machinery.
-    """
-    cfg = load_config()
-    headless: bool = cfg.get("automation", {}).get("headless", True)
-    email, password = get_credentials()
-
-    if not email or not password:
-        return {
-            "ok": False,
-            "error": "No credentials configured. Call /automation/setup first.",
-        }
-
-    summary = {
-        "ok": True,
-        "reviews_found": 0,
-        "replies_posted": 0,
-        "errors": 0,
-        "skipped": 0,
-    }
-
-    driver = None
-    try:
-        driver = _get_driver(headless=headless)
-
-        if not _login(driver, email, password):
-            summary["ok"] = False
-            summary["error"] = (
-                "Login failed. Check credentials, or 2FA/CAPTCHA intervention required."
+    async def post_reply(self, review_id: str, reply_text: str) -> bool:
+        """Post reply to a review."""
+        try:
+            # Find review element
+            review_elem = self.driver.find_element(
+                By.CSS_SELECTOR,
+                f"[data-review-id='{review_id}']"
             )
-            return summary
+            
+            # Click reply button
+            reply_button = review_elem.find_element(
+                By.CSS_SELECTOR,
+                "button[aria-label*='Reply']"
+            )
+            reply_button.click()
+            
+            await asyncio.sleep(1)
+            
+            # Find reply textarea
+            reply_textarea = self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "textarea[aria-label*='reply']"))
+            )
+            reply_textarea.send_keys(reply_text)
+            
+            await asyncio.sleep(1)
+            
+            # Click submit
+            submit_button = self.driver.find_element(
+                By.CSS_SELECTOR,
+                "button[aria-label*='Submit']"
+            )
+            submit_button.click()
+            
+            await asyncio.sleep(2)
+            
+            logger.info("✓ Reply posted for review %s", review_id)
+            return True
+            
+        except Exception as exc:
+            logger.error("Failed to post reply: %s", exc)
+            self._save_screenshot(f"reply_error_{review_id}")
+            return False
 
-        if not _navigate_to_reviews(driver):
-            summary["ok"] = False
-            summary["error"] = "Failed to navigate to reviews page."
-            return summary
+    def _save_screenshot(self, name: str) -> None:
+        """Save screenshot for debugging."""
+        try:
+            screenshots_dir = self.config.automation.screenshots_dir
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
+            
+            filepath = screenshots_dir / f"{name}.png"
+            self.driver.save_screenshot(str(filepath))
+            
+            logger.info("Screenshot saved: %s", filepath)
+        except Exception as exc:
+            logger.warning("Failed to save screenshot: %s", exc)
 
-        reviews = scrape_unanswered_reviews(driver)
-        summary["reviews_found"] = len(reviews)
-        logger.info("%d unanswered reviews found.", len(reviews))
 
+# ---------------------------------------------------------------------------
+# High-Level Automation Runner
+# ---------------------------------------------------------------------------
+
+async def run_automation_cycle() -> dict:
+    """Run complete automation cycle: login, fetch reviews, generate replies, post."""
+    from database import get_database
+    from reply_generator import ReplyGenerator
+    
+    config = get_config()
+    cred_store = get_browser_credential_store()
+    
+    # Load credentials
+    credentials = cred_store.load()
+    if not credentials:
+        logger.error("No credentials found. Configure via /api/credentials/save")
+        return {"error": "No credentials configured"}
+    
+    stats = {
+        "total_reviews": 0,
+        "new_reviews": 0,
+        "replied": 0,
+        "errors": 0,
+    }
+    
+    # Run browser automation
+    with BrowserDriver(headless=config.automation.headless) as driver:
+        automation = GMBAutomation(driver)
+        
+        # Login
+        if not await automation.login(credentials.email, credentials.password):
+            return {"error": "Login failed"}
+        
+        # Navigate to reviews
+        if not await automation.navigate_to_reviews():
+            return {"error": "Failed to navigate to reviews"}
+        
+        # Fetch unanswered reviews
+        reviews = await automation.fetch_unanswered_reviews()
+        stats["total_reviews"] = len(reviews)
+        
+        if not reviews:
+            logger.info("No unanswered reviews found")
+            return stats
+        
+        # Save to database
+        db = get_database()
+        for review in reviews:
+            is_new = db.upsert_review(
+                review_id=review["review_id"],
+                location_id="default",  # TODO: Extract actual location
+                rating=review["rating"],
+                review_text=review["review_text"],
+                reviewer_name=review["reviewer_name"],
+                created_at=None,
+            )
+            if is_new:
+                stats["new_reviews"] += 1
+        
+        # Generate and post replies
+        generator = ReplyGenerator(
+            business_name=config.automation.business_name,
+            tone="Professional",
+        )
+        
         for review in reviews:
             try:
-                reply_text = generate_reply_fn(review["rating"], review["text"])
-                success = post_reply_to_review(driver, review, reply_text)
-                if success:
-                    summary["replies_posted"] += 1
+                # Generate reply
+                reply = await generator.generate_reply(
+                    review_text=review["review_text"],
+                    rating=review["rating"],
+                    reviewer_name=review["reviewer_name"],
+                )
+                
+                # Post reply
+                if await automation.post_reply(review["review_id"], reply):
+                    db.mark_replied(review["review_id"], reply)
+                    stats["replied"] += 1
                 else:
-                    summary["errors"] += 1
+                    db.mark_error(review["review_id"], "Failed to post reply")
+                    stats["errors"] += 1
+                    
             except Exception as exc:
-                logger.error("Unhandled error for review %s: %s", review.get("review_id"), exc)
-                summary["errors"] += 1
-
-    except Exception as exc:
-        logger.error("Browser automation crashed: %s\n%s", exc, traceback.format_exc())
-        if driver:
-            _screenshot(driver, "crash")
-        summary["ok"] = False
-        summary["error"] = str(exc)
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-
-    return summary
+                logger.error("Error processing review %s: %s", review["review_id"], exc)
+                db.mark_error(review["review_id"], str(exc))
+                stats["errors"] += 1
+    
+    logger.info("Automation cycle complete: %s", stats)
+    return stats

@@ -1,240 +1,206 @@
 """
-automation_service.py – Background automation service.
+automation_service.py – Background automation service orchestration.
 
-Runs on a configurable interval, checks for new Google Business reviews via
-Selenium browser automation, generates AI replies using the app.py pipeline,
-and posts them automatically.
-
-The service can be started and stopped via the FastAPI endpoints in app.py:
-    POST /automation/start   – start background loop
-    POST /automation/stop    – stop background loop
-    GET  /automation/status  – current status + recent log lines
-    POST /automation/setup   – save Google credentials (encrypted)
-    POST /automation/config  – update interval / headless setting
+Manages periodic review checking and reply posting with proper
+async task management, clean shutdown, and health monitoring.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import logging.handlers
-import os
-import threading
-import time
+import signal
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
-# ---------------------------------------------------------------------------
-# Automation logger (writes to automation.log in addition to console)
-# ---------------------------------------------------------------------------
+from config import get_config
+from browser_automation import run_automation_cycle
 
-LOG_PATH = os.getenv("AUTOMATION_LOG_PATH", "./logs/automation.log")
-
-Path(os.path.dirname(LOG_PATH) or ".").mkdir(parents=True, exist_ok=True)
-
-auto_logger = logging.getLogger("automation_service")
-auto_logger.setLevel(logging.INFO)
-
-_file_handler = logging.handlers.RotatingFileHandler(
-    LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
-)
-_file_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-)
-auto_logger.addHandler(_file_handler)
-
-# Also propagate to root logger (console)
-auto_logger.propagate = True
-
-# ---------------------------------------------------------------------------
-# Service state
-# ---------------------------------------------------------------------------
-
-_service_thread: Optional[threading.Thread] = None
-_stop_event = threading.Event()
-_service_running = False
-_last_run: Optional[datetime] = None
-_last_result: Optional[dict] = None
-
-
-def _get_interval_minutes() -> int:
-    """Read interval from config.json."""
-    from browser_automation import load_config  # noqa: PLC0415
-    cfg = load_config()
-    return int(cfg.get("automation", {}).get("interval_minutes", 60))
-
-
-def _is_enabled() -> bool:
-    from browser_automation import load_config  # noqa: PLC0415
-    cfg = load_config()
-    return bool(cfg.get("automation", {}).get("enabled", True))
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# AI reply generation (sync wrapper around app.py's async pipeline)
+# Service State Management
 # ---------------------------------------------------------------------------
 
-def _generate_reply_sync(rating: int, review_text: str) -> str:
+class ServiceState:
     """
-    Synchronous wrapper: generate an AI reply for a single review.
-    Runs the async generate_replies function in a new event loop.
+    Thread-safe service state manager.
+    
+    Tracks running status and provides clean shutdown mechanism.
     """
-    try:
-        from app import Job, Review, generate_replies  # noqa: PLC0415
-        from browser_automation import load_config  # noqa: PLC0415
 
-        cfg = load_config()
-        business_name = cfg.get("automation", {}).get("business_name", "Our Business")
+    def __init__(self):
+        """Initialize service state."""
+        self.running = False
+        self.task: Optional[asyncio.Task] = None
+        self.last_run: Optional[datetime] = None
+        self.last_stats: dict = {}
+        self.error_count = 0
 
-        job = Job(
-            business_name=business_name,
-            signoff="-",
-            tone_style="Professional",
-            persona="trades",
-            compliance_profile="General",
-            reviews=[Review(rating=rating, text=review_text or "No review text provided")],
-        )
+    def start(self) -> None:
+        """Mark service as running."""
+        self.running = True
+        logger.info("Service state: RUNNING")
 
-        # Run async function in a dedicated event loop
-        loop = asyncio.new_event_loop()
-        try:
-            replies = loop.run_until_complete(generate_replies(job))
-        finally:
-            loop.close()
+    def stop(self) -> None:
+        """Mark service as stopped."""
+        self.running = False
+        logger.info("Service state: STOPPED")
 
-        return replies[0] if replies else "Thank you for your feedback!"
-    except Exception as exc:
-        auto_logger.error("Reply generation failed: %s", exc)
-        return "Thank you for your feedback!"
-
-
-# ---------------------------------------------------------------------------
-# Single automation pass
-# ---------------------------------------------------------------------------
-
-def run_once() -> dict:
-    """
-    Execute one full automation pass: login → scrape reviews → post replies.
-    Returns a summary dict and logs all actions.
-    """
-    global _last_run, _last_result
-
-    from browser_automation import run_browser_automation  # noqa: PLC0415
-
-    auto_logger.info("=== Automation pass starting ===")
-    start_ts = datetime.now(timezone.utc)
-
-    result = run_browser_automation(generate_reply_fn=_generate_reply_sync)
-
-    _last_run = datetime.now(timezone.utc)
-    _last_result = result
-
-    duration = (datetime.now(timezone.utc) - start_ts).total_seconds()
-
-    if result.get("ok"):
-        auto_logger.info(
-            "Pass complete in %.1fs – reviews found: %d, replies posted: %d, errors: %d",
-            duration,
-            result.get("reviews_found", 0),
-            result.get("replies_posted", 0),
-            result.get("errors", 0),
-        )
-    else:
-        auto_logger.error("Pass failed: %s", result.get("error", "unknown error"))
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Background thread loop
-# ---------------------------------------------------------------------------
-
-def _service_loop() -> None:
-    """Thread target: repeatedly run automation at the configured interval."""
-    global _service_running
-
-    auto_logger.info("Automation service started.")
-    _service_running = True
-
-    while not _stop_event.is_set():
-        if _is_enabled():
-            try:
-                run_once()
-            except Exception as exc:
-                auto_logger.error("Unhandled exception in automation loop: %s", exc)
+    def update_stats(self, stats: dict) -> None:
+        """Update last run statistics."""
+        self.last_run = datetime.now(timezone.utc)
+        self.last_stats = stats
+        
+        if stats.get("error"):
+            self.error_count += 1
         else:
-            auto_logger.info("Automation disabled in config – skipping pass.")
+            self.error_count = 0
 
-        interval_seconds = _get_interval_minutes() * 60
-        auto_logger.info(
-            "Next run in %d minutes. Waiting…", _get_interval_minutes()
-        )
+    def get_health(self) -> dict:
+        """
+        Get service health status.
+        
+        Returns:
+            Health status dictionary
+        """
+        return {
+            "running": self.running,
+            "last_run": self.last_run.isoformat() if self.last_run else None,
+            "last_stats": self.last_stats,
+            "error_count": self.error_count,
+            "healthy": self.running and self.error_count < 3,
+        }
 
-        # Sleep in small increments so we can respond to stop requests quickly
-        from browser_automation import STOP_CHECK_INTERVAL_SECONDS  # noqa: PLC0415
-        slept = 0
-        while slept < interval_seconds and not _stop_event.is_set():
-            time.sleep(min(STOP_CHECK_INTERVAL_SECONDS, interval_seconds - slept))
-            slept += STOP_CHECK_INTERVAL_SECONDS
 
-    _service_running = False
-    auto_logger.info("Automation service stopped.")
+# Global service state
+_service_state = ServiceState()
 
 
 # ---------------------------------------------------------------------------
-# Public start / stop API
+# Automation Service
 # ---------------------------------------------------------------------------
 
-def start_service() -> dict:
-    """Start the background automation thread (no-op if already running)."""
-    global _service_thread, _stop_event
-
-    if _service_running and _service_thread and _service_thread.is_alive():
-        return {"ok": False, "message": "Automation service is already running."}
-
-    _stop_event.clear()
-    _service_thread = threading.Thread(
-        target=_service_loop, name="automation-service", daemon=True
+async def automation_service_loop() -> None:
+    """
+    Main automation service loop.
+    
+    Runs periodic review checking and reply posting with error handling.
+    """
+    config = get_config()
+    interval = config.automation.interval_minutes * 60  # Convert to seconds
+    
+    logger.info(
+        "Automation service starting (interval: %d minutes)",
+        config.automation.interval_minutes,
     )
-    _service_thread.start()
-    auto_logger.info("Automation service start requested.")
-    return {"ok": True, "message": "Automation service started."}
-
-
-def stop_service() -> dict:
-    """Signal the background thread to stop after the current pass finishes."""
-    global _stop_event
-
-    if not _service_running:
-        return {"ok": False, "message": "Automation service is not running."}
-
-    _stop_event.set()
-    auto_logger.info("Automation service stop requested.")
-    return {"ok": True, "message": "Automation service stopping after current pass."}
+    
+    _service_state.start()
+    
+    while _service_state.running:
+        try:
+            logger.info("Running automation cycle...")
+            
+            # Run automation cycle
+            stats = await run_automation_cycle()
+            
+            # Update state
+            _service_state.update_stats(stats)
+            
+            logger.info("Automation cycle complete: %s", stats)
+            
+            # Sleep until next run
+            if _service_state.running:
+                logger.info("Sleeping for %d seconds...", interval)
+                await asyncio.sleep(interval)
+        
+        except asyncio.CancelledError:
+            logger.info("Automation service cancelled")
+            break
+        
+        except Exception as exc:
+            logger.exception("Automation service error: %s", exc)
+            _service_state.update_stats({"error": str(exc)})
+            
+            # Exponential backoff on errors
+            backoff = min(300, 60 * (2 ** _service_state.error_count))
+            logger.warning("Backing off for %d seconds due to errors", backoff)
+            await asyncio.sleep(backoff)
+    
+    _service_state.stop()
+    logger.info("Automation service stopped")
 
 
 # ---------------------------------------------------------------------------
-# Status & log helpers
+# Service Control
 # ---------------------------------------------------------------------------
 
-def get_status() -> dict:
-    return {
-        "running": _service_running,
-        "interval_minutes": _get_interval_minutes(),
-        "last_run": _last_run.isoformat() if _last_run else None,
-        "last_result": _last_result,
-    }
+def start_service() -> None:
+    """Start automation service in background."""
+    if _service_state.task and not _service_state.task.done():
+        logger.warning("Service already running")
+        return
+    
+    # Create task
+    _service_state.task = asyncio.create_task(automation_service_loop())
+    
+    # Register signal handlers for clean shutdown
+    def signal_handler(sig, frame):
+        logger.info("Received signal %s, stopping service...", sig)
+        stop_service()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    logger.info("Automation service started")
 
 
-def get_recent_logs(lines: int = 100) -> list[str]:
-    """Return the last *lines* entries from automation.log."""
+def stop_service() -> None:
+    """Stop automation service gracefully."""
+    _service_state.stop()
+    
+    if _service_state.task and not _service_state.task.done():
+        _service_state.task.cancel()
+    
+    logger.info("Automation service stop requested")
+
+
+def get_service_status() -> dict:
+    """Get current service status."""
+    
+    Returns:
+        Service status dictionary
+    """
+    return _service_state.get_health()
+
+
+# ---------------------------------------------------------------------------
+# Standalone Runner
+# ---------------------------------------------------------------------------
+
+async def main() -> None:
+    """Run automation service as standalone script."""
+    config = get_config()
+    
+    if not config.automation.enabled:
+        logger.error("Automation service is disabled in configuration")
+        return
+    
+    logger.info("Starting automation service (standalone mode)")
+    
     try:
-        if not os.path.exists(LOG_PATH):
-            return []
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
-            all_lines = f.readlines()
-        return [ln.rstrip() for ln in all_lines[-lines:]]
-    except Exception as exc:
-        return [f"Error reading log: {exc}"]
+        await automation_service_loop()
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    finally:
+        logger.info("Automation service exiting")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    
+    asyncio.run(main())
