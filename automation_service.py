@@ -137,10 +137,7 @@ async def automation_service_loop() -> None:
 # ---------------------------------------------------------------------------
 
 def start_service() -> None:
-    """Start automation service in background.
-    
-    Creates asyncio task and registers signal handlers.
-    """
+    """Start automation service in background."""
     if _service_state.task and not _service_state.task.done():
         logger.warning("Service already running")
         return
@@ -158,6 +155,7 @@ def start_service() -> None:
     
     logger.info("Automation service started")
 
+
 def stop_service() -> None:
     """Stop automation service gracefully."""
     _service_state.stop()
@@ -169,7 +167,7 @@ def stop_service() -> None:
 
 
 def get_service_status() -> dict:
-    """Get current service status.
+    """Get current service status."""
     
     Returns:
         Service status dictionary
@@ -197,6 +195,7 @@ async def main() -> None:
         logger.info("Interrupted by user")
     finally:
         logger.info("Automation service exiting")
+
 
 if __name__ == "__main__":
     logging.basicConfig(
