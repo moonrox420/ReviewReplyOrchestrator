@@ -13,8 +13,15 @@ env/
 
 # Sensitive config (do NOT commit real credentials)
 .env
+engine.env
 tokens/fernet.key
 tokens/google_tokens.json
+
+# Sellable bot: local runtime files (generated per-customer)
+sellable/license.json
+sellable/bot_config.json
+sellable/dist/
+sellable/build/
 
 # SQLite database
 data/*.db

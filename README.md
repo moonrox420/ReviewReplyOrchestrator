@@ -1,232 +1,249 @@
-# Review Reply Orchestrator
+# ReviewReplyOrchestrator
 
-**Fully automated Google Business review reply system.**  
-AI reads your Google reviews, generates professional replies, and posts them automatically — no manual copy-paste, no Google Cloud account, no API keys required.
+**AI-powered Google Business review reply automation — two systems in one repo.**
 
----
+This repository contains:
 
-## How It Works
+| System | Directory | Purpose |
+|--------|-----------|---------|
+| **Production Orchestrator** | *(root)* | Self-hosted FastAPI server; manages OAuth, browser automation, and scheduled review replies for your own business |
+| **Sellable Bot** | [`sellable/`](sellable/) | Standalone, license-gated Python bot for resale to customers; runs locally with no server required |
 
-1. You install the software on your Windows computer.  
-2. You enter your Google Business email and password once (encrypted and stored locally).  
-3. The software opens Chrome in the background (headless mode), logs into Google Business, and checks for new unanswered reviews.  
-4. It generates AI replies using a local AI model (Ollama / LM Studio).  
-5. It posts the replies directly to Google Business automatically.  
-6. It repeats every 60 minutes (configurable).  
+Both systems are fully independent — you can build, run, or ship either one without touching the other.
 
 ---
 
-## Quick Start
+## Repository Layout
 
-### 1. Install Dependencies
-
-**Windows (PowerShell):**
-```powershell
-cd ReviewReplyOrchestrator
-.venv\Scripts\activate
-pip install -r requirements.txt
+```
+ReviewReplyOrchestrator/
+│
+├── app.py                        # FastAPI web server & API endpoints
+├── browser_automation.py         # Selenium browser automation
+├── automation_service.py         # Background automation scheduler
+├── monitor.py                    # Google My Business API monitor
+├── google_api.py                 # Google OAuth & GMB API helpers
+├── config.json                   # Runtime automation configuration
+├── requirements.txt              # Production orchestrator dependencies
+├── engine.env                    # Local environment config (git-ignored)
+├── .env.example                  # Environment variable template (copy → engine.env)
+├── start-orchestrator.ps1        # Windows quick-start script
+├── run-uvicorn.bat               # Windows uvicorn launcher
+├── submit-reviews.ps1            # Manual review submission helper
+├── test-full.ps1                 # Full integration test script
+├── test-lead.ps1                 # Lead intake test script
+├── README.md                     # This file
+│
+└── sellable/                     # ── Sellable Bot (independent product) ──
+    ├── review_bot_sellable.py        # Main bot (local AI: Ollama / LM Studio)
+    ├── review_reply_bot_sellable.py  # Alternate bot (Anthropic Claude API)
+    ├── license_system.py             # License generation & subscription validation (local-AI variant)
+    ├── license_validator.py          # Alternate license validator (Claude API variant)
+    ├── generate_license.py           # CLI: generate license key for a customer
+    ├── generate_customer_license.py  # CLI: alternate license key generator
+    ├── requirements_sellable.txt     # Dependencies for local-AI variant
+    ├── sellable_requirements.txt     # Dependencies for Claude API variant
+    ├── build.ps1                     # Build ReviewBot.exe (PyInstaller)
+    ├── build_executable.ps1          # Build ReviewReplyBot.exe (PyInstaller)
+    ├── CUSTOMER_INSTRUCTIONS.txt     # End-user guide (local AI variant)
+    ├── CUSTOMER_SETUP.txt            # End-user guide (Claude API / exe variant)
+    └── README.md                     # Sellable bot documentation
 ```
 
-**macOS / Linux:**
+---
+
+## Branch Strategy
+
+| Branch | Purpose |
+|--------|---------|
+| `main` | Stable, production-ready code for both systems |
+| `refactor/production-optimization` | Active production orchestrator refactor |
+| `copilot/*` | Automated Copilot improvement branches |
+
+New features targeting the orchestrator go on `refactor/production-optimization` and are merged to `main` after review.  
+Sellable bot changes are made directly to `sellable/` on `main` or a dedicated `feature/sellable-*` branch.
+
+---
+
+## 1 · Production Orchestrator
+
+A self-hosted FastAPI web server that monitors your own Google Business reviews and automatically posts AI-generated replies via browser automation.
+
+### Features
+
+- Automated review monitoring (Google My Business API or browser scraping)
+- AI reply generation (local Ollama or LM Studio — no cloud API costs)
+- Fernet-encrypted credential storage
+- Configurable automation schedule (default: every 60 minutes)
+- Stripe payment webhook support for hosted subscription plans
+- Health check and status API
+
+### Installation
+
+**Prerequisites:** Python 3.11+, Google Chrome, Ollama or LM Studio
+
 ```bash
+# 1. Clone repository
+git clone https://github.com/moonrox420/ReviewReplyOrchestrator.git
 cd ReviewReplyOrchestrator
-source .venv/bin/activate
+
+# 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Configure environment
+cp .env.example engine.env
+# Edit engine.env with your credentials
+
+# 4. Start AI backend (choose one)
+ollama pull qwen2.5:7b-instruct && ollama serve   # Ollama
+# — or —
+# Start LM Studio and enable local server on port 1234
+
+# 5. Start server
+python app.py
+# or on Windows: .\start-orchestrator.ps1
 ```
 
-### 2. Install Chrome + ChromeDriver
+### Usage
 
-Chrome must be installed on the computer.  
-ChromeDriver is downloaded automatically by `webdriver-manager` on first run.
+Open **http://127.0.0.1:7363** in your browser.
 
-### 3. Configure AI Model
-
-Edit `engine.env` and set the AI model endpoint:
-
-```
-OLLAMA_URL=http://127.0.0.1:11434          # if using Ollama
-LMSTUDIO_URL=http://127.0.0.1:1234/v1/...  # if using LM Studio
-REPLY_MODEL=qwen2.5:7b-instruct
-```
-
-### 4. Start the Server
-
-**Windows:**
-```powershell
-.\start-orchestrator.ps1
-```
-
-**macOS / Linux:**
-```bash
-uvicorn app:app --host 127.0.0.1 --port 7363 --reload
-```
-
-### 5. Set Up Browser Automation
-
-Open your browser and go to: **http://127.0.0.1:7363**
-
-1. In the **"Automatic Review Replies"** section, enter your **Google Business email and password**.
+1. In the **"Automatic Review Replies"** section, enter your Google Business email and password.
 2. Click **"Save & Start Automation"**.
-3. The software encrypts your credentials and starts the automation service immediately.
-4. It will check for new reviews every hour automatically.
+3. The system encrypts your credentials and starts checking for new reviews on the configured interval.
 
----
-
-## Web Interface
-
-| URL | Description |
-|-----|-------------|
-| `http://127.0.0.1:7363/` | Main dashboard |
-| `http://127.0.0.1:7363/automation/status` | Automation service status |
-| `http://127.0.0.1:7363/automation/logs` | View automation log |
-| `http://127.0.0.1:7363/healthz` | Health check |
-
----
-
-## API Endpoints
-
-### Browser Automation
+### Key API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `GET` | `/` | Main dashboard |
+| `GET` | `/healthz` | Health check |
 | `POST` | `/automation/setup` | Save credentials & start service |
-| `POST` | `/automation/start` | Start background service |
-| `POST` | `/automation/stop` | Stop background service |
-| `GET`  | `/automation/status` | Current status |
-| `POST` | `/automation/run-now` | Trigger an immediate run |
+| `GET` | `/automation/status` | Automation service status |
+| `POST` | `/automation/run-now` | Trigger immediate run |
 | `POST` | `/automation/config` | Update interval / headless setting |
-| `GET`  | `/automation/logs` | Recent log lines |
+| `GET` | `/automation/logs` | Recent log lines |
+| `GET` | `/oauth/start` | Begin Google OAuth flow |
+| `POST` | `/lead-intake` | Generate sample replies |
 
-**Setup example:**
-```bash
-curl -X POST http://127.0.0.1:7363/automation/setup \
-  -H "Content-Type: application/json" \
-  -d '{"email":"you@gmail.com","password":"your_password"}'
-```
+### Configuration
 
-**Configure interval:**
-```bash
-curl -X POST http://127.0.0.1:7363/automation/config \
-  -H "Content-Type: application/json" \
-  -d '{"interval_minutes": 30, "headless": true}'
-```
-
-### Review Management (Google API, optional)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET`  | `/oauth/start` | Begin Google OAuth flow |
-| `POST` | `/reviews/sync` | Manual review sync |
-| `GET`  | `/reviews/status` | API monitoring status |
-
-### AI Reply Generation
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/lead-intake` | Generate 5 sample replies |
-
----
-
-## Configuration Files
-
-### `config.json`
-
-```json
-{
-  "automation": {
-    "enabled": true,
-    "interval_minutes": 60,
-    "headless": true,
-    "business_name": "My Business"
-  },
-  "google_credentials": {
-    "email": "",
-    "password_enc": ""
-  }
-}
-```
-
-- `enabled` – turn automation on/off without stopping the service  
-- `interval_minutes` – how often to check for new reviews (1–1440, default: 60)  
-- `headless` – run Chrome invisibly in background (default: true)  
-- `business_name` – used when generating AI reply tone/context  
-- `password_enc` – Fernet-encrypted password (never stored in plain text)
-
-### `engine.env`
+Copy `.env.example` to `engine.env` and set the required values:
 
 ```
 ENGINE_HOST=127.0.0.1
 ENGINE_PORT=7363
 OLLAMA_URL=http://127.0.0.1:11434
 REPLY_MODEL=qwen2.5:7b-instruct
-REVIEW_CHECK_INTERVAL_MINUTES=60
+GOOGLE_CLIENT_ID=<from Google Cloud Console>
+GOOGLE_CLIENT_SECRET=<from Google Cloud Console>
 ```
 
+See `.env.example` for all available settings.
+
+### Deployment (Production)
+
+```ini
+# /etc/systemd/system/review-orchestrator.service
+[Unit]
+Description=ReviewReplyOrchestrator
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/review-orchestrator
+EnvironmentFile=/opt/review-orchestrator/engine.env
+ExecStart=/opt/review-orchestrator/.venv/bin/python app.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Production checklist:**
+- [ ] Set all required variables in `engine.env` (never commit this file)
+- [ ] Restrict file permissions: `chmod 600 engine.env tokens/fernet.key`
+- [ ] Configure HTTPS reverse proxy (nginx / Caddy)
+- [ ] Enable systemd service and set up log rotation
+- [ ] Back up `./data/` directory regularly
+
+### Support
+
+- **Email:** droxai25@outlook.com
+- **GitHub Issues:** available to licensed users
+
 ---
 
-## Logs
+## 2 · Sellable Bot
 
-| File | Description |
-|------|-------------|
-| `logs/automation.log` | All automation activity (timestamped) |
-| `logs/screenshots/` | Error screenshots for debugging |
+A self-contained, license-gated Python bot intended for resale. Customers run it on their own machine — no server needed.
 
-Log entries include:
-- Every review check (timestamp, reviews found)
-- Every reply posted (review ID, reply text preview)
-- All errors with full stack traces
+> **Full documentation:** [`sellable/README.md`](sellable/README.md)
+
+### Quick Overview
+
+| Variant | Bot file | AI backend | Build output |
+|---------|----------|------------|--------------|
+| Local AI | `sellable/review_bot_sellable.py` | Ollama / LM Studio | `ReviewBot.exe` |
+| Cloud AI | `sellable/review_reply_bot_sellable.py` | Anthropic Claude API | `ReviewReplyBot.exe` |
+
+### Generating a Customer License
+
+```bash
+cd sellable
+python generate_license.py
+# Enter customer email + Gumroad purchase ID → prints MRX-XXXXXXXX-XXXXXXXX-XXXXXXXX
+```
+
+### Building an Executable
+
+```powershell
+cd sellable
+.\build.ps1              # builds dist/ReviewBot.exe (local AI variant)
+.\build_executable.ps1   # builds dist/ReviewReplyBot.exe (Claude API variant)
+```
+
+### Customer Installation
+
+Customers follow the instructions in:
+- [`sellable/CUSTOMER_INSTRUCTIONS.txt`](sellable/CUSTOMER_INSTRUCTIONS.txt) — local AI variant
+- [`sellable/CUSTOMER_SETUP.txt`](sellable/CUSTOMER_SETUP.txt) — Claude API / exe variant
+
+### Customizing Before Resale
+
+1. **Change the master key** in both `sellable/license_system.py` and `sellable/license_validator.py` (replace `MOONROX2026` with your secret — do **not** commit it).
+2. **Update support contact** in `CUSTOMER_INSTRUCTIONS.txt` and `CUSTOMER_SETUP.txt`.
+3. **Update your store URL** in `CUSTOMER_INSTRUCTIONS.txt`.
 
 ---
 
-## Error Handling
+## Security Notes
 
-| Situation | Behavior |
-|-----------|----------|
-| **2FA prompt** | Automation pauses, logs warning, retries next interval |
-| **CAPTCHA** | Automation pauses, logs warning, saves screenshot |
-| **Network error** | Retries with exponential back-off |
-| **Element not found** | Saves screenshot, logs error, continues to next review |
-| **Wrong credentials** | Logs error, does not crash |
-
----
-
-## Security
-
-- Passwords are **never logged** or stored in plain text.
-- Credentials are encrypted using **Fernet symmetric encryption** (AES-128-CBC + HMAC-SHA256).
-- The Fernet key is stored in `tokens/fernet.key` (permissions: 0600).
-- The key and encrypted token files are excluded from git (see `.gitignore`).
+- `engine.env` and `.env` are git-ignored — never commit real credentials.
+- `tokens/fernet.key` and `tokens/google_tokens.json` are git-ignored.
+- The sellable bot's `LICENSE_MASTER_KEY` must be kept secret; rotate it before distribution.
+- See `.gitignore` for the full list of excluded sensitive files.
 
 ---
 
 ## Troubleshooting
 
-**Chrome not found:**  
-Install Google Chrome from https://www.google.com/chrome/
+**AI not responding:**
+```bash
+curl http://127.0.0.1:11434/api/tags   # Ollama health check
+```
 
-**`webdriver-manager` download fails:**  
-Check your internet connection. The driver is downloaded once and cached.
+**OAuth callback fails:**
+- Ensure `GOOGLE_REDIRECT_URI` in `engine.env` matches the URI registered in Google Cloud Console.
 
-**2FA keeps blocking automation:**  
-Log into https://myaccount.google.com/security and enable "Less secure app access" or create an App Password.
+**Browser automation crashes:**
+- Check `logs/screenshots/` for a screenshot of the error state.
+- Verify Chrome and ChromeDriver versions are compatible.
 
-**Reviews page not loading:**  
-Check `logs/screenshots/` for a screenshot of the error state.
-
----
-
-## Files
-
-| File | Description |
-|------|-------------|
-| `app.py` | FastAPI web server & API endpoints |
-| `browser_automation.py` | Selenium browser automation logic |
-| `automation_service.py` | Background service thread & scheduler |
-| `monitor.py` | Google API-based monitoring (optional) |
-| `google_api.py` | Google OAuth & GMB API helpers (optional) |
-| `config.json` | Automation configuration |
-| `engine.env` | Environment variables |
-| `requirements.txt` | Python dependencies |
+**License validation fails (sellable bot):**
+- Regenerate and re-send the license key to the customer.
+- Ensure `LICENSE_MASTER_KEY` in the bot matches the key used when the license was generated.
 
 ---
 
