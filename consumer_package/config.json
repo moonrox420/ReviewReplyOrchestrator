@@ -1,0 +1,12 @@
+{
+  "automation": {
+    "enabled": true,
+    "interval_minutes": 60,
+    "headless": true,
+    "business_name": "My Business"
+  },
+  "google_credentials": {
+    "email": "dustinhill25@droxaillc.com",
+    "password_enc": "gAAAAABpu4ihz6xwziilJJw2IYwLP53BvBh1i22A3ym19d0hyM60SnYKdXxnWxB_EQKT9NqjkHAnevMDdTEbknytQ7kReNhBPQ=="
+  }
+}
