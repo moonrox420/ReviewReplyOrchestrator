@@ -7,7 +7,7 @@ uvicorn==0.24.0
 python-multipart==0.0.6
 
 # Stripe Payment Processing
-stripe==5.10.0
+stripe==12.5.1
 
 # Database ORM
 sqlalchemy==2.0.23
