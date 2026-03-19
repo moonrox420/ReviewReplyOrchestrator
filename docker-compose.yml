@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  fulfillment-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.fulfillment
+    volumes:
+      - ./audit.log:/app/audit.log
+      - ./fulfillment.db:/app/fulfillment.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: PostgreSQL for production
+  # postgres:
+  #   image: postgres:15-alpine
+  #   environment:
+  #     POSTGRES_USER: droxai
+  #     POSTGRES_PASSWORD: your_password_here
+  #     POSTGRES_DB: droxai_fulfillment
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+  #   restart: unless-stopped
+
+volumes:
+  # postgres_data:
+  audit_data:

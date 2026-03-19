@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment Successful — DroxAI</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            line-height: 1.6; 
+            color: #1a202c; 
+            background: #f7fafc;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .success-container {
+            max-width: 600px;
+            margin: 40px auto;
+            padding: 60px 40px;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .success-icon {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 30px;
+            font-size: 40px;
+        }
+        h1 {
+            font-size: 2.5rem;
+            color: #2d3748;
+            margin-bottom: 15px;
+        }
+        .subtitle {
+            font-size: 1.2rem;
+            color: #4a5568;
+            margin-bottom: 40px;
+        }
+        .next-steps {
+            background: #f0fff4;
+            border: 1px solid #9ae6b4;
+            border-radius: 15px;
+            padding: 30px;
+            text-align: left;
+            margin-bottom: 30px;
+        }
+        .next-steps h2 {
+            color: #22543d;
+            font-size: 1.3rem;
+            margin-bottom: 20px;
+        }
+        .next-steps ol {
+            color: #276749;
+            padding-left: 20px;
+        }
+        .next-steps li {
+            margin-bottom: 12px;
+            font-size: 1rem;
+        }
+        .info-box {
+            background: #ebf8ff;
+            border: 1px solid #90cdf4;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        .info-box h3 {
+            color: #2b6cb0;
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+        }
+        .info-box p {
+            color: #2c5282;
+            font-size: 0.95rem;
+        }
+        .cta-button {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 18px 45px;
+            border-radius: 50px;
+            text-decoration: none;
+            font-weight: 700;
+            font-size: 1.1rem;
+            box-shadow: 0 10px 25px rgba(102,126,234,0.3);
+            transition: all 0.3s ease;
+            margin: 10px;
+        }
+        .cta-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 35px rgba(102,126,234,0.4);
+        }
+        .cta-button.secondary {
+            background: white;
+            color: #667eea;
+            border: 2px solid #667eea;
+            box-shadow: none;
+        }
+        .cta-button.secondary:hover {
+            background: #667eea;
+            color: white;
+        }
+        .support-info {
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 1px solid #e2e8f0;
+        }
+        .support-info h3 {
+            color: #2d3748;
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+        }
+        .support-info p {
+            color: #4a5568;
+            font-size: 0.95rem;
+        }
+        .support-info a {
+            color: #667eea;
+            text-decoration: none;
+        }
+        .support-info a:hover {
+            text-decoration: underline;
+        }
+        footer {
+            text-align: center;
+            padding: 20px;
+            color: #718096;
+            font-size: 0.9rem;
+        }
+        @media (max-width: 768px) {
+            .success-container {
+                margin: 20px;
+                padding: 40px 25px;
+            }
+            h1 {
+                font-size: 2rem;
+            }
+            .cta-button {
+                display: block;
+                margin: 10px 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="success-container">
+        <div class="success-icon">✓</div>
+        
+        <h1>Payment Successful!</h1>
+        <p class="subtitle">Thank you for your purchase. Your order is being processed.</p>
+        
+        <div class="next-steps">
+            <h2>📦 What Happens Next</h2>
+            <ol>
+                <li><strong>Check your email</strong> — You'll receive your license key and download link within 2 minutes.</li>
+                <li><strong>Download the installer</strong> — Click the link in your email to download your product.</li>
+                <li><strong>Install & activate</strong> — Run the installer and enter your license key when prompted.</li>
+                <li><strong>Start using your product</strong> — You're all set! Enjoy your new AI-powered tool.</li>
+            </ol>
+        </div>
+        
+        <div class="info-box">
+            <h3>📧 Didn't receive your email?</h3>
+            <p>Check your spam/junk folder. If you still don't see it within 5 minutes, contact us at <a href="mailto:droxai25@outlook.com">droxai25@outlook.com</a> with your order details.</p>
+        </div>
+        
+        <div>
+            <a href="https://droxai.com" class="cta-button">Back to Homepage</a>
+            <a href="mailto:droxai25@outlook.com?subject=Order Support" class="cta-button secondary">Contact Support</a>
+        </div>
+        
+        <div class="support-info">
+            <h3>Need Help?</h3>
+            <p>Our support team is here to help you get started.</p>
+            <p>Email: <a href="mailto:droxai25@outlook.com">droxai25@outlook.com</a></p>
+            <p>Response time: Usually within 24 hours</p>
+        </div>
+    </div>
+    
+    <footer>
+        <p>&copy; 2025 DroxAI LLC. All rights reserved.</p>
+        <p>Self-hosted AI software that pays for itself.</p>
+    </footer>
+</body>
+</html>
